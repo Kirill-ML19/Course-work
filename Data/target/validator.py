@@ -8,15 +8,64 @@ from typing import List
 
 class Validator(VKValidator):
 
+    '''
+    Dataset validation and preprocessing pipeline.
+
+    This class is responsible for:
+
+    1. Parsing personality analysis results
+    2. Extracting Big Five psychological traits
+    3. Building structured feature dataset
+    4. Filtering inaccessible VK users
+
+    Processing stages:
+
+        Raw dataset
+            ↓
+        Parsing serialized analysis results
+            ↓
+        Target extraction (Big Five model)
+            ↓
+        VK profile accessibility validation
+            ↓
+        Clean dataset construction
+    '''
+
     def __init__(self, dataset: pd.DataFrame)->None:
+        '''
+        Initialize Validator.
+
+        Args:
+            dataset (pd.DataFrame):
+                Original dataset containing analysis results.
+
+        Attributes:
+            dataset (pd.DataFrame):
+                Stored dataset reference.
+        '''
         super().__init__()
         self.dataset =  dataset
 
             
     @property
-    def build(self)->pd.DataFrame:
+    def build(self)->tuple[pd.DataFrame, List[int]]:
         '''
+        Execute dataset preprocessing pipeline.
 
+        Pipeline stages:
+
+        1. Parse serialized analysis results
+        2. Build Big Five feature matrix
+        3. Remove inaccessible VK accounts
+        4. Extract VK user identifiers
+
+        Returns:
+            tuple:
+                clean_df (pd.DataFrame):
+                    Preprocessed dataset.
+
+                vk_id (List[int]):
+                    List of valid VK user identifiers.
         '''
         parsed_result = self.dataset['result'].apply(self._parsing)
         data = self._build(parsed_result)
@@ -24,9 +73,7 @@ class Validator(VKValidator):
         vk_id = self.get_vk_id(clean_df['vk_id'])
         return clean_df, vk_id
     
-
-
-    def _parsing(self, result_str:str)->pd.Series:
+    def _parsing(self, result_str:str)->dict:
         '''
         This function parses the string representation of the personality analysis result and extracts data according to the Big Five model.
 
@@ -37,9 +84,7 @@ class Validator(VKValidator):
             Dict[str, object]
             dictionary with parsing results
             {
-                'big_five': Dict[strm, float | np.nan]
-                'additional_info': Dict[str, dict]
-                'has_additional_info': bool
+                'big_five': Dict[str, float | np.nan]
             }
         '''
         try:
@@ -63,14 +108,22 @@ class Validator(VKValidator):
             
     def _build(self, parsed_result: pd.Series)->pd.DataFrame:
         '''        
-        This function collects a DataFrame of target variables.
+        Construct structured feature dataset.
 
-        Parametrs:
-            df (pd.DataFrame): original dataframe.
-            parsed_result (pd.Series): one-dimensional table of target variables.
+        The function converts parsed psychological traits into
+        numerical feature matrix representation.
+
+        Processing steps:
+
+        1. Extract Big Five trait vectors
+        2. Convert to DataFrame format
+        3. Remove incomplete feature rows
+        4. Merge with metadata columns
+        5. Aggregate duplicate VK users keeping latest record
 
         Returns:
-            df_final (pd.Dataframe): A dataframe with target variables converted to float32 and structured columns.
+            pd.DataFrame:
+                Cleaned feature dataset.
         '''
         columns = [result['big_five'] for result in parsed_result]
         big_five_df = pd.DataFrame(columns)
@@ -85,13 +138,25 @@ class Validator(VKValidator):
         
     def _filter_vk_id(self, dataframe:pd.DataFrame, retries: int = 3)->pd.DataFrame:
         '''
-        This method filters users who have a closed account or their account has been deleted.
+        Filter VK users with inaccessible or deleted profiles.
 
-        Parametrs:
-            dataframe: pd.DataFrame - target dataframe
-        
-        Returns: 
-            pd.DataFrame - cleared target dataframe
+        The function removes users if:
+
+        - Account is deleted or deactivated
+        - Profile is closed and inaccessible
+
+        Batch validation is used to reduce API requests.
+
+        Args:
+            dataframe (pd.DataFrame):
+                Target dataset.
+
+            retries (int):
+                Number of retry attempts in case of VK API failure.
+
+        Returns:
+            pd.DataFrame:
+                Dataset containing only accessible VK users.
         '''
         vk_ids = dataframe['vk_id'].tolist()
         inaccessible_ids = set()
@@ -121,12 +186,14 @@ class Validator(VKValidator):
     
     def get_vk_id(self,vk_id:pd.Series)->List[int]:
         '''
-        This method returns a list of vk id.
+        Extract VK identifiers from dataset.
 
-        Parametrs:
-            vk_id: pd.Series - VK identifier column vector.
+        Args:
+            vk_id (pd.Series):
+                Column containing VK user identifiers.
 
         Returns:
-            List[int] - list of ids.
+            List[int]:
+                List of VK user IDs.
         '''
         return vk_id.tolist()
