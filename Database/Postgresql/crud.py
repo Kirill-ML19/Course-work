@@ -126,7 +126,7 @@ class CRUD():
             if not client:
                 raise ValueError(f"Client with vk_id {self.client_vk_id} not found.")
 
-            for features in extractor.node_attributes(max_worker=max_worker):
+            for features in extractor.node_attributes(max_workers=max_worker):
                     vk_id = features.get('user_id')
                     if not vk_id:
                         logging.warning()
