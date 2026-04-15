@@ -1,8 +1,9 @@
+import pandas as pd
 from typing import List
 from Database.Postgresql.session import Session as DBSession 
 from Database.Postgresql.base import Base
 from sqlalchemy.exc import IntegrityError
-from Database.Postgresql.model import Client, VkUser, NodeFeatures
+from Database.Postgresql.model import Client, VkUser, NodeFeatures, Targets
 from Data.features.VKFeatureExtractor import VKFeaturesExtractor
 import logging
 
@@ -10,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 class CRUD():
 
-    def __init__(self, client_vk_id: int, vk_users:List[int] )->None:
+    def __init__(self, client_vk_id: int, vk_users:List[int], targets: pd.DataFrame)->None:
         '''
         Initializing a CRUD operation for a specific client and a list of its VK users.
 
@@ -20,6 +21,7 @@ class CRUD():
         '''
         self.client_vk_id = client_vk_id
         self.vk_users = vk_users
+        self.targets = targets
 
     @staticmethod
     def create_tables(engine)->None:
@@ -174,3 +176,49 @@ class CRUD():
                     except Exception as e:
                         db_session.rollback()
                         logging.error(f"Error processing node features for vk_id {vk_id}: {e}")
+    
+    def insert_targets(self)->None:
+        '''
+        '''
+        with DBSession() as db_session: 
+            client = db_session.query(Client).filter(Client.vk_id == self.client_vk_id).first()
+            if not client:
+                raise ValueError(f"Client with vk_id {self.client_vk_id} not found.")
+            
+            for _, row in self.targets.iterrows():
+                vk_id = row['vk_id']
+
+                if not vk_id:
+                    logging.warning('vk id is missing, skipping row')
+                    continue
+
+                try:    
+                    vk_user = db_session.query(VkUser).filter(
+                        VkUser.vk_id == vk_id,
+                        VkUser.client_id == client.id
+                    ).first()
+
+                    target = db_session.query(Targets).filter(
+                        Targets.vk_user_id == vk_user.id
+                    ).first()
+                    if target: 
+                        target.Extraversion = row['Экстраверсия–интроверсия'],
+                        target.Agreeableness = row['Привязанность–обособленность'],
+                        target.Conscientiousness = row['Самоконтроль–импульсивность'],
+                        target.Neuroticism = row['Эмоциональная_устойчивость–эмоциональная_неустойчивость'],
+                        target.Openness = row['Экспрессивность–практичность']
+                    else:
+                        target = Targets(
+                            vk_user_id = vk_user.id,
+                            Extraversion = row['Экстраверсия–интроверсия'],
+                            Agreeableness = row['Привязанность–обособленность'],
+                            Conscientiousness = row['Самоконтроль–импульсивность'],
+                            Neuroticism = row['Эмоциональная_устойчивость–эмоциональная_неустойчивость'],
+                            Openness = row['Экспрессивность–практичность']
+                        )
+                    db_session.add(target)
+                    db_session.commit()
+                    logging.info(f'Inserted targets for vk_id {vk_id}')
+                except Exception as e:
+                    db_session.rollback()
+                    logging.error(f'Error processing targets for vk_id {vk_id}: {e}')

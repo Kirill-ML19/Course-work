@@ -40,6 +40,13 @@ class VkUser(Base):
         cascade='all, delete-orphan'
     )
 
+    targets: Mapped['Targets'] = relationship(
+        'Targets',
+        back_populates='vk_user',
+        uselist=False,
+        cascade='all, delete-orphan'
+    )
+
     __table_args__ = (
         Index('idx_vk_users_vk_id', 'vk_id'),
         Index('idx_vk_users_client_id', 'client_id'),
@@ -66,3 +73,16 @@ class NodeFeatures(Base):
     __table_args__ = (
         Index('idx_node_features_vk_user_id', 'vk_user_id'),
     )
+
+class Targets(Base):
+    __tablename__ = 'targets'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vk_user_id: Mapped[int] = mapped_column(Integer, ForeignKey('vk_users.id', ondelete='CASCADE'), unique=True, nullable=False)
+    Extraversion: Mapped[float] = mapped_column(Float, default=0)
+    Agreeableness: Mapped[float] = mapped_column(Float, default=0)
+    Conscientiousness: Mapped[float] = mapped_column(Float, default=0)
+    Neuroticism: Mapped[float] = mapped_column(Float, default=0)
+    Openness: Mapped[float] = mapped_column(Float, default=0)
+
+    vk_user: Mapped['VkUser'] = relationship('VkUser', back_populates='targets')
