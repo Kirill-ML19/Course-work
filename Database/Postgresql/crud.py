@@ -2,16 +2,18 @@ import pandas as pd
 from typing import List
 from Database.Postgresql.session import Session as DBSession 
 from Database.Postgresql.base import Base
-from sqlalchemy.exc import IntegrityError
-from Database.Postgresql.model import Client, VkUser, NodeFeatures, Targets
+from sqlalchemy import desc, func, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from Database.Postgresql.model import VkUser, NodeFeatures, Targets, RawDate
 from Data.features.VKFeatureExtractor import VKFeaturesExtractor
+from Data.target.VkValidator import VKValidator
 import logging
 
 logging.basicConfig(level=logging.INFO)
 
-class CRUD():
+class CRUD:
 
-    def __init__(self, client_vk_id: int, vk_users:List[int], targets: pd.DataFrame)->None:
+    def __init__(self)->None:
         '''
         Initializing a CRUD operation for a specific client and a list of its VK users.
 
@@ -19,9 +21,8 @@ class CRUD():
             client_vk_id: int - VK client ID.
             vk_users: List[int] - List of VK IDs of users to add.
         '''
-        self.client_vk_id = client_vk_id
-        self.vk_users = vk_users
-        self.targets = targets
+        self.session = DBSession
+        self.validator = VKValidator().time_validation
 
     @staticmethod
     def create_tables(engine)->None:
@@ -32,34 +33,35 @@ class CRUD():
             engine: SQLAlchemy engine instance.
 
         """
-        Base.metadata.create_all(bind=engine)
-        logging.info("Tables checked/created successfully.")
+        try:
+            Base.metadata.create_all(bind=engine)
+            logging.info("Tables checked/created successfully.")
+        except SQLAlchemyError as e:
+            logging.error(f'Error creating/verifying database tables: {e}')
 
-    def insert_client(self)->None:
+    def insert_raw_date(self, rawdates: pd.DataFrame)->None:
         '''
-        Adds a new client to the clients table using their VK ID.
+        '''
+        batch_size = 1000
+        rawdates = rawdates.rename(columns={
+            'completion_date': 'Completion_date',
+            'Экстраверсия–интроверсия': 'Extraversion',
+            'Привязанность–обособленность': 'Agreeableness',
+            'Самоконтроль–импульсивность': 'Conscientiousness',
+            'Эмоциональная_устойчивость–эмоциональная_неустойчивость': 'Neuroticism',
+            'Экспрессивность–практичность': 'Openness'
+        })
+        records = rawdates.to_dict(orient='records')
 
-        The function opens a database session, creates a Client object with the specified
-        VK ID, and attempts to save it. If a client with the same VK ID already exists,
-        an IntegrityError exception is caught, the transaction is rolled back,
-        and a warning is written to the log.
-        
-        Returns:
-            None
-        
-        Raises:
-            IntegrityError - unique data duplication error.
-        
-        '''
-        with DBSession() as db_session:
-            client = Client(vk_id = self.client_vk_id)
-            db_session.add(client)
+        with self.session() as db_session:
             try:
-                db_session.commit()
-                logging.info(f'Client with vk_id={self.client_vk_id} created.')
-            except IntegrityError:
+                for i in range(0, len(records), batch_size):
+                    batch = records[i: i+batch_size]
+                    db_session.bulk_insert_mappings(RawDate, batch)
+                    db_session.commit()
+            except SQLAlchemyError as e:
                 db_session.rollback()
-                logging.warning('The client has already been added to the table')
+                raise 
 
     def insert_vk_users(self)->None:
         '''
@@ -81,30 +83,52 @@ class CRUD():
             - INFO if users were successfully added.
             - ERROR if an IntegrityError occurs (the exception is rethrown).
         '''
-        with DBSession() as db_session:
-            client = db_session.query(Client).filter(Client.vk_id == self.client_vk_id).first()
-            if not client:
-                client = Client(vk_id =self.client_vk_id)
+        batch_size = 1000
+        valid_vk_ids = []
+        vk_users = []
+
+        with self.session() as db_session:
+            response = db_session.query(RawDate).all()
+            vk_ids = [vk_user.vk_id for vk_user in response]
+            for i in range(0, len(vk_ids), batch_size):
+                batch_vk_id = ",".join(map(str, vk_ids[i: i + batch_size]))
+                valid_users = self.validator(batch_vk_id)
+                valid_vk_ids.extend(valid_users)
+            stmt = (
+                select(
+                    RawDate.vk_id,
+                    RawDate.Extraversion,
+                    RawDate.Agreeableness,
+                    RawDate.Conscientiousness,
+                    RawDate.Neuroticism,
+                    RawDate.Openness
+                )
+                .where(RawDate.vk_id.in_(valid_vk_ids))
+                .distinct(RawDate.vk_id)
+                .order_by(RawDate.vk_id, desc(RawDate.Completion_date))
+            )
+            valid_responses = db_session.execute(stmt).mappings().all()
+            for valid_response in valid_responses:
+                user = VkUser(vk_id=valid_response['vk_id'])
+                targets = Targets(
+                    Extraversion = valid_response['Extraversion'],
+                    Agreeableness = valid_response['Agreeableness'],
+                    Conscientiousness = valid_response['Conscientiousness'],
+                    Neuroticism = valid_response['Neuroticism'],
+                    Openness = valid_response['Openness']
+                )
+                user.targets = targets
+                vk_users.append(user)
+            for i in range(0, len(vk_users), batch_size):
                 try:
-                    db_session.flush()
-                except IntegrityError:
+                    batch = vk_users[i: i+batch_size]
+                    db_session.add_all(batch)
+                    db_session.commit()
+                    logging.info('The VK user patch has been successfully inserted into the table.')
+                except IntegrityError as e:
                     db_session.rollback()
-
-
-            for vk_user in self.vk_users:
-                new_vk_user = VkUser(vk_id = vk_user, client_id = client.id)
-                db_session.add(new_vk_user)
-
-            try:
-                db_session.commit()
-                logging.info(f'Added {len(self.vk_users)} VK users for client vk_id={self.client_vk_id}')
-            except IntegrityError as e:
-                db_session.rollback()
-                logging.error(f'Failed to insert VK users for client {self.client_vk_id}: {e}')
-                raise
-            
-            
-
+                    logging.error(f'Error inserting VK user patch: {e}')
+    
     def insert_node_features(self, max_worker: int = 3)->None:
         """
         Inserts or updates node features into the 'node_features' table for all users in extractor.users_id.
@@ -120,105 +144,84 @@ class CRUD():
             ValueError: If Client or VkUser not found.
             Exception: Logs and skips if feature extraction or insert fails for a user.
         """
-        extractor = VKFeaturesExtractor(self.vk_users)
-
-        with DBSession() as db_session:
-
-            client = db_session.query(Client).filter(Client.vk_id == self.client_vk_id).first()
-            if not client:
-                raise ValueError(f"Client with vk_id {self.client_vk_id} not found.")
-
+        with self.session() as db_session:
+            subq = select(VkUser.vk_id).join(NodeFeatures, VkUser.id == NodeFeatures.vk_user_id)
+            stmt = select(VkUser.vk_id).where(VkUser.vk_id.not_in(subq))
+            vk_users = [vk_user[0] for vk_user in db_session.execute(statement=stmt)]
+            #vk_users = [vk_user[0] for vk_user in db_session.execute(statement=select(VkUser.vk_id)).all()]
+            extractor = VKFeaturesExtractor(users_id=vk_users)
+            
             for features in extractor.node_attributes(max_workers=max_worker):
                     vk_id = features.get('user_id')
                     if not vk_id:
                         logging.warning()
                         continue
                     try:
-
-                        vk_user = db_session.query(VkUser).filter(
-                            VkUser.vk_id == vk_id,
-                            VkUser.client_id == client.id
-                        ).first()
+                        vk_user = db_session.query(VkUser).filter(VkUser.vk_id == vk_id).first()
                         if not vk_user:
-                            logging.warning(f"VkUser with vk_id {vk_id} not found for client {self.client_vk_id}, skipping insert.")
+                            logging.warning(f"VkUser with vk_id {vk_id} not found, skipping insert.")
                             continue
 
                         node_feat = db_session.query(NodeFeatures).filter(NodeFeatures.vk_user_id == vk_user.id).first()
 
                         if node_feat:
+                            node_feat.age = features.get('age')
+                            node_feat.gender = features.get('gender', 0)
+                            node_feat.followers = features.get('followers', 0)
                             node_feat.friends_count = features.get('friends_count', 0)
                             node_feat.male_friends = features.get('male_count', 0)
                             node_feat.female_friends = features.get('female_count', 0)
                             node_feat.unknown_friends = features.get('unknown_count', 0)
                             node_feat.photo_count = features.get('photo_count', 0)
-                            node_feat.likes_total = features.get('likes_total', 0)
-                            node_feat.average_likes = features.get('average_likes', 0.0)
+                            node_feat.photo_likes_count = features.get('photo_likes_count', 0)
+                            node_feat.average_photo_likes = features.get('average_photo_likes', 0.0)
+                            node_feat.photo_comments_count = features.get('photo_comments_count', 0)
+                            node_feat.average_photo_comments = features.get('average_photo_comments', 0.0)
+                            node_feat.photo_reposts_count = features.get('photo_reposts_count', 0)
+                            node_feat.average_photo_reposts = features.get('average_photo_reposts', 0.0)
+                            node_feat.post_count = features.get('posts_count', 0)
+                            node_feat.post_likes_count = features.get('post_likes_count', 0)
+                            node_feat.average_post_likes = features.get('average_post_likes', 0.0)
+                            node_feat.post_comments_count = features.get('post_comments_count', 0)
+                            node_feat.average_post_comments = features.get('average_post_comments', 0.0)
+                            node_feat.post_views_count = features.get('post_views_count', 0)
+                            node_feat.average_post_views = features.get('average_post_views', 0.0)
+                            node_feat.post_reposts_count = features.get('post_reposts_count', 0)   # в модели поле post_reports_count
+                            node_feat.average_post_reports = features.get('average_post_reposts', 0.0)
                             node_feat.groups_count = features.get('groups_count', 0)
                             node_feat.average_member = features.get('average_member', 0.0)
-                            logging.info(f"Updated node features for vk_id {vk_id}")
                         else:
                             node_feat = NodeFeatures(
                                 vk_user_id=vk_user.id,
+                                age=features.get('age'),
+                                gender=features.get('gender', 0),
+                                followers=features.get('followers', 0),
                                 friends_count=features.get('friends_count', 0),
                                 male_friends=features.get('male_count', 0),
                                 female_friends=features.get('female_count', 0),
                                 unknown_friends=features.get('unknown_count', 0),
                                 photo_count=features.get('photo_count', 0),
-                                likes_total=features.get('likes_total', 0),
-                                average_likes=features.get('average_likes', 0.0),
+                                photo_likes_count=features.get('photo_likes_count', 0),
+                                average_photo_likes=features.get('average_photo_likes', 0.0),
+                                photo_comments_count=features.get('photo_comments_count', 0),
+                                average_photo_comments=features.get('average_photo_comments', 0.0),
+                                photo_reposts_count=features.get('photo_reposts_count', 0),
+                                average_photo_reposts=features.get('average_photo_reposts', 0.0),
+                                post_count=features.get('posts_count', 0),
+                                post_likes_count=features.get('post_likes_count', 0),
+                                average_post_likes=features.get('average_post_likes', 0.0),
+                                post_comments_count=features.get('post_comments_count', 0),
+                                average_post_comments=features.get('average_post_comments', 0.0),
+                                post_views_count=features.get('post_views_count', 0),
+                                average_post_views=features.get('average_post_views', 0.0),
+                                post_reposts_count=features.get('post_reposts_count', 0),
+                                average_post_reports=features.get('average_post_reposts', 0.0),
                                 groups_count=features.get('groups_count', 0),
                                 average_member=features.get('average_member', 0.0)
                             )
-                            db_session.add(node_feat)
-                            logging.info(f"Inserted node features for vk_id {vk_id}")
-
+                        db_session.add(node_feat)
+                        logging.info(f"Inserted node features for vk_id {vk_id}")
                         db_session.commit()
                     except Exception as e:
                         db_session.rollback()
                         logging.error(f"Error processing node features for vk_id {vk_id}: {e}")
-    
-    def insert_targets(self)->None:
-        '''
-        '''
-        with DBSession() as db_session: 
-            client = db_session.query(Client).filter(Client.vk_id == self.client_vk_id).first()
-            if not client:
-                raise ValueError(f"Client with vk_id {self.client_vk_id} not found.")
-            
-            for _, row in self.targets.iterrows():
-                vk_id = row['vk_id']
-
-                if not vk_id:
-                    logging.warning('vk id is missing, skipping row')
-                    continue
-
-                try:    
-                    vk_user = db_session.query(VkUser).filter(
-                        VkUser.vk_id == vk_id,
-                        VkUser.client_id == client.id
-                    ).first()
-
-                    target = db_session.query(Targets).filter(
-                        Targets.vk_user_id == vk_user.id
-                    ).first()
-                    if target: 
-                        target.Extraversion = row['Экстраверсия–интроверсия'],
-                        target.Agreeableness = row['Привязанность–обособленность'],
-                        target.Conscientiousness = row['Самоконтроль–импульсивность'],
-                        target.Neuroticism = row['Эмоциональная_устойчивость–эмоциональная_неустойчивость'],
-                        target.Openness = row['Экспрессивность–практичность']
-                    else:
-                        target = Targets(
-                            vk_user_id = vk_user.id,
-                            Extraversion = row['Экстраверсия–интроверсия'],
-                            Agreeableness = row['Привязанность–обособленность'],
-                            Conscientiousness = row['Самоконтроль–импульсивность'],
-                            Neuroticism = row['Эмоциональная_устойчивость–эмоциональная_неустойчивость'],
-                            Openness = row['Экспрессивность–практичность']
-                        )
-                    db_session.add(target)
-                    db_session.commit()
-                    logging.info(f'Inserted targets for vk_id {vk_id}')
-                except Exception as e:
-                    db_session.rollback()
-                    logging.error(f'Error processing targets for vk_id {vk_id}: {e}')
