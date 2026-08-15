@@ -1,10 +1,12 @@
 import os
 from dotenv import load_dotenv
-from Scripts.process_target import load_validate_targets
+from sqlalchemy import select
+from Database.Postgresql.model import VkUser
 from Data.features.VKFeatureExtractor import VKFeaturesExtractor
 from Database.Neo4j.neo4j_writer import Neo4jWriter
+from Database.Postgresql.session import Session as DBSession
 
-_, vk_ids = load_validate_targets()
+load_dotenv()
 
 def load_graph():
 
@@ -17,7 +19,14 @@ def load_graph():
     if not password:
         raise ValueError("NEO4J_PASSWORD is not set")
 
+    with DBSession() as session:
+        stmt = select(VkUser.vk_id)
+        responses = session.execute(statement=stmt).all()
+
+    vk_ids = set([response[0] for response in responses])    
+
     extractor = VKFeaturesExtractor(users_id=vk_ids)
+
     writer = Neo4jWriter(uri, user, password)
 
     try:

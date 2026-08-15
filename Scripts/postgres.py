@@ -1,4 +1,3 @@
-import os
 import logging
 from dotenv import load_dotenv
 from Scripts.process_target import load_validate_targets
@@ -11,9 +10,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 def db():
-
     CRUD.create_tables(engine)
     
-    crud = CRUD(client_vk_id=int(os.getenv('VK_ID')), vk_users=vk_ids, targets=df_targets)
-    crud.insert_targets()
+    crud = CRUD()
+    crud.insert_raw_date(rawdates=df_targets)
+    crud.insert_vk_users()
+    crud.insert_node_features(max_worker=5)
 db()
