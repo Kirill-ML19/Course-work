@@ -1,13 +1,18 @@
 import time
 import logging
 from dotenv import load_dotenv
-from collections import Counter, defaultdict
+from datetime import date
+from collections import Counter
 from vk_api.vk_api import VkApiMethod 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Generator, Any
+from typing import Dict, List, Generator
 from Data.features.API_Gateway import API_Gateway
-from Data.features.types import GroupFeatures, PhotoFeatures, MutualFriendsItems, LikesItemsFeatures, MutualGroupsItems, MutualCitiesItems, MutualEducationItems, NodeFeatures, FriendshipFeaturesItems
+from Data.features.types import GroupFeatures, PhotoFeatures, MutualFriendsItems, LikesItemsFeatures, MutualGroupsItems, MutualCitiesItems, MutualEducationItems, NodeFeatures, FriendshipFeaturesItems, PostFeatures
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from sqlalchemy import select
+from Database.Postgresql.model import VkUser
+from Database.Postgresql.session import Session as DBSession
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +50,47 @@ class VKFeaturesExtractor(API_Gateway):
             raise ValueError("users_id list cannot be empty")
         self.users_id = users_id
 
-    def _friends_features(self, user_id:int)->Dict[str, int]:
+    def _personal_features(self, user_id: int)->Dict[str, int]: 
+        '''
+        '''
+        user_info = self._get_user_info(user_id=user_id)
+
+        if not user_info:
+            return {
+                'age': None,
+                'gender': 0,
+                'followers': 0
+            }
+
+        bdate_raw = user_info[0].get('bdate', '')
+        gender = user_info[0].get('sex', 0)
+        followers = user_info[0].get('followers_count', 0)
+
+        age = None
+        if bdate_raw:
+            parts = bdate_raw.split('.')
+            if len(parts) == 3 and all(parts):
+                try:
+                    day, month, year = map(int, parts)
+                    today = date.today()
+
+                    if year < 1930 or year > today.year:
+                        age = None
+                    else:
+                        birth_date = date(year, month, day)
+                        age = today.year - birth_date.year - (
+                            (today.month, today.day) < (birth_date.month, birth_date.day)
+                        )
+                except ValueError:
+                    age = None
+
+        return {
+            'age': age,
+            'gender': gender,
+            'followers': followers
+        }
+
+    def _friends_features(self, user_id:int)->Dict[str, int]: 
         '''
         Extracts friend-based features.
 
@@ -127,15 +172,97 @@ class VKFeaturesExtractor(API_Gateway):
         response = self._get_photo(user_id)
         items = response.get('items', [])
         photo_count = response.get('count', 0)
-        likes_total = sum(photo.get('likes', {}).get('count', 0) for photo in items)
-        avg = likes_total / photo_count if photo_count > 0 else 0.0
+
+        if photo_count == 0:
+            return {
+                'photo_count': 0,
+                'photo_likes_count': 0,
+                'average_photo_likes': 0.0,
+                'photo_comments_count': 0,
+                'average_photo_comments': 0.0,
+                'photo_reposts_count': 0,
+                'average_photo_reposts': 0.0
+            }
+
+        photo_likes_count = sum(photo.get('likes', {}).get('count', 0) for photo in items)
+        avg_likes = photo_likes_count / photo_count 
+        photo_comment_count = sum(photo.get('comments', {}).get('count', 0) for photo in items)
+        avg_comments = photo_comment_count / photo_count
+        photo_reposts_count = sum(photo.get('reposts', {}).get('count', 0) for photo in items)
+        avg_reposts = photo_reposts_count / photo_count
+
         return {
             'photo_count': photo_count,
-            'likes_total': likes_total,
-            'average_likes': round(avg, 2)
+            'photo_likes_count': photo_likes_count,
+            'average_photo_likes': round(avg_likes, 2),
+            'photo_comments_count': photo_comment_count,
+            'average_photo_comments': round(avg_comments, 2),
+            'photo_reposts_count': photo_reposts_count,
+            'average_photo_reposts': round(avg_reposts, 2)
         }
+
+    def _posts_features(self, user_id: int)->PostFeatures:
+        '''
+        '''
+        response = self._get_posts(user_id)
+        count_posts = response.get('count', 0)
+        posts = response.get('items', [])
+
+        if count_posts == 0:
+            return {
+                'posts_count': 0, 
+                'post_likes_count': 0, 
+                'average_post_likes': 0.0, 
+                'post_comments_count': 0, 
+                'average_post_comments': 0.0, 
+                'post_views_count': 0, 
+                'average_post_views': 0.0, 
+                'post_reposts_count': 0, 
+                'average_post_reposts': 0.0
+            }
+
+        count_post_likes = 0
+        count_post_comments = 0
+        count_post_views = 0
+        count_post_reposts = 0 
+
+
+        for post in posts:
+
+            likes = post.get('likes', {})
+            count_post_likes += likes.get('count', 0)
+
+            comments = post.get('comments', {})
+            count_post_comments += comments.get('count', 0)
+            
+            reposts = post.get('reposts', {})
+            count_post_reposts += reposts.get('count', 0)
+
+            views_data = post.get('views', {})
+            if views_data and isinstance(views_data, dict):
+                count_post_views += views_data.get('count', 0)
+            else:
+                attachments = post.get('attachments', [])
+                for attachment in attachments:
+                    if attachment.get('type')=='video':
+                        video = attachment.get('video', [])
+                        count_post_views += video.get('views', 0)
+
+
+        return {
+            'posts_count': count_posts,
+            'post_likes_count': count_post_likes,
+            'average_post_likes': round(count_post_likes / count_posts, 2),
+            'post_comments_count': count_post_comments,
+            'average_post_comments': round(count_post_comments / count_posts, 2),
+            'post_views_count': count_post_views, 
+            'average_post_views': round(count_post_views / count_posts, 2),
+            'post_reposts_count': count_post_reposts,
+            'average_post_reposts': round(count_post_reposts / count_posts, 2)
+        }
+
     
-    def _extract_for_user(self, user_id: int, local_vk: VkApiMethod = None)->NodeFeatures:
+    def _extract_for_user(self, user_id: int)->NodeFeatures:
         '''
         Extracts base features for a single user using local vk session.
 
@@ -160,9 +287,11 @@ class VKFeaturesExtractor(API_Gateway):
         '''
         features = {'user_id': user_id}
         try:
+            features.update(self._personal_features(user_id))
             features.update(self._friends_features(user_id))
             features.update(self._photo_features(user_id))
             features.update(self._groups_features(user_id))
+            #features.update(self._posts_features(user_id))
         except Exception as e:
             logging.warning(f'Error extracting features for {user_id}: {e}')
         return features
@@ -442,13 +571,14 @@ class VKFeaturesExtractor(API_Gateway):
 
         return result
     
-    def build_edge_features(self):
+    def build_edge_features(self)->List:
 
-        mutual_friends = self._mutual_friends_features()
-        mutual_groups = self._mutual_groups_features()
-        city = self._common_city_features()
-        education = self._mutual_education_features()
-        friendship = self._friendship_features()
+        #mutual_friends = self._mutual_friends_features()
+        #mutual_groups = self._mutual_groups_features()
+        #city = self._common_city_features()
+        #education = self._mutual_education_features()
+        #friendship = self._friendship_features()
+        likes = self._likes_features()
 
         edges = []
 
@@ -459,13 +589,22 @@ class VKFeaturesExtractor(API_Gateway):
                     "source": u1,
                     "target": u2,
                     "features": {
-                        "mutual_friends": mutual_friends[u1][u2],
-                        "mutual_groups": mutual_groups[u1][u2],
-                        "common_city": city[u1][u2],
-                        "common_university": education[u1][u2]["common_university"],
-                        "common_faculty": education[u1][u2]["common_faculty"],
-                        "friend_status": friendship[u1][u2],
+                        #"mutual_friends": mutual_friends[u1][u2],
+                        #"mutual_groups": mutual_groups[u1][u2],
+                        #"common_city": city[u1][u2],
+                        #"common_university": education[u1][u2]["common_university"],
+                        #"common_faculty": education[u1][u2]["common_faculty"],
+                        #"friend_status": friendship[u1][u2],
+                        "mutual_likes": likes[u1][u2]
                     }
                 })
 
         return edges
+
+
+#with DBSession() as session:
+#    stmt = select(VkUser.vk_id)
+#    vk_ids = [vk_id[0] for vk_id in session.execute(statement=stmt).all()]
+
+#extr = VKFeaturesExtractor(users_id=vk_ids)
+#print(extr._likes_features())

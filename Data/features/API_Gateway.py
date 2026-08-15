@@ -1,11 +1,16 @@
 import vk_api
 import time
+import random
 import threading
 from typing import List, Dict, Any
 from Data.features.client import Client
 from vk_api import VkApi
 from vk_api.vk_api import VkApiMethod
-from Data.features.types import FriendResponse, PhotoResponse, GroupResponse, FriendshipResponse, LikesResponse, MutualGroupResponse, MutualCitiesResponse, MutualEducationResponse
+from Data.features.types import FriendResponse, PhotoResponse, GroupResponse, FriendshipResponse, LikesResponse, MutualGroupResponse, MutualCitiesResponse, MutualEducationResponse, UserInfoResponse
+
+from sqlalchemy import select
+from Database.Postgresql.model import VkUser
+from Database.Postgresql.session import Session as DBSession
 
 class API_Gateway(Client):
 
@@ -13,9 +18,13 @@ class API_Gateway(Client):
         super().__init__()
         self._api_lock = threading.Lock()
         self._last_call_time = 0
-        self._min_interval = 0.35
+        self._min_interval = 0.50
     
-    def _call_vk_method(self, method: str, params: dict = None, retries: int = 3)->Any:
+    def _call_vk_method(self, method: str, params: dict = None, retries: int = 5)->Any:
+
+        params = params or {}
+        last_exception = None
+
         for attempt in range(retries):
             try:
                 with self._api_lock:
@@ -26,14 +35,25 @@ class API_Gateway(Client):
                     response = self.session.method(method, params)
                     self._last_call_time = time.monotonic()
                 return response
+            
             except vk_api.exceptions.ApiError as e:
                 if e.code == 6:
                     delay = 0.35 * (2 ** attempt) + (hash(str(params)) % 10) / 100
                     time.sleep(delay)
                     continue
+
+                elif e.code == 9:
+                    base_delay = 60 
+                    delay = base_delay * (2 ** attempt)
+                    delay+=random.uniform(0, 10)
+                    print(f'[{method}] Flood control (code 9). Retry {attempt+1}/{retries}. Sleep {delay:.0f}s')
+                    time.sleep(delay)
+                    continue
+
                 else:
                     print(f'VK API error in {method}: {e}')
                     raise
+
             except vk_api.exceptions.ApiHttpError as e:
                 if e.response.status_code == 500:
                     if attempt < retries - 1:
@@ -41,9 +61,71 @@ class API_Gateway(Client):
                         print(f'HTTP 500. Retry {attempt+1}/{retries}. Sleep {delay:.2f}s')
                         time.sleep(delay)
                         continue 
+                    else:
+                        raise
+                else:
                     raise
-        else:
-            raise RuntimeError(f'Failed after {retries} retries for method {method} with params {params}')
+        raise RuntimeError(f'Failed after {retries} retries for method {method} with params {params}')
+
+    def get_inactive_users(self, users_id: List[int]) -> List[Dict[str, Any]]:
+        """
+        Возвращает список пользователей, чьи профили:
+        - закрыты и недоступны текущему токену,
+        - удалены (deactivated = 'deleted'),
+        - заблокированы (deactivated = 'banned').
+
+        :param users_id: Список ID пользователей VK.
+        :return: Список словарей с информацией о неактивных пользователях.
+                Каждый словарь содержит поля: id, first_name, last_name, is_closed, can_access_closed, deactivated (если есть).
+        """
+        inactive_users = []
+        batch_size = 1000
+
+        for i in range(0, len(users_id), batch_size):
+            batch = users_id[i:i + batch_size]
+            params = {
+                'user_ids': ','.join(map(str, batch)),
+                'fields': 'is_closed, can_access_closed'
+            }
+            response = self._call_vk_method('users.get', params)
+
+            for user in response:
+                # Проверяем, удалён или заблокирован ли пользователь
+                if 'deactivated' in user:
+                    inactive_users.append(user)
+                    continue
+
+                # Проверяем, закрыт ли профиль и недоступен ли он
+                is_closed = user.get('is_closed', False)
+                can_access = user.get('can_access_closed', True)
+
+                if is_closed and not can_access:
+                    inactive_users.append(user)
+
+        return inactive_users
+
+
+    def _get_user_info(self, user_id: int)->List[UserInfoResponse]:
+        '''
+        '''
+        params = {
+            'user_ids': str(user_id),
+            'fields': 'sex,bdate,followers_count'
+        }
+        code = '''
+        '''
+        response = self._call_vk_method('users.get', params)
+        return response
+
+    def _get_posts(self, user_id: int)->Dict[str, Any]:
+        '''
+        '''
+        params = {
+            'domain': user_id,
+            'filter': 'owner'
+        }
+        response = self._call_vk_method('wall.get', params)
+        return response
 
     def _get_friends(self,user_id:int)->FriendResponse:
         '''
@@ -290,7 +372,7 @@ class API_Gateway(Client):
         while True:
             params = {
                 'owner_id': user_id,
-                'album_id': 'wall',
+                'album_id': 'profile',
                 'extended': 1,
                 'offset': offset,
                 'count': count
@@ -510,3 +592,18 @@ class API_Gateway(Client):
         for idx, resp in enumerate(responses):
             resp['id'] = user_ids[idx]
         return responses
+
+    def get_likes(self, user_id, photo_id):
+        params = {
+            'type': 'photo',
+            'owner_id': user_id,
+            'item_id': photo_id
+        }
+        return self._call_vk_method('likes.getList', params=params)
+
+with DBSession() as session:
+    stmt = select(VkUser.vk_id)
+    vk_ids = [vk_id[0] for vk_id in session.execute(statement=stmt).all()]
+
+#ap = API_Gateway()
+#print(ap.get_inactive_users(vk_ids))

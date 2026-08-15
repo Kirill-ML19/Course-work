@@ -155,6 +155,8 @@ class FriendshipFeaturesItems(TypedDict):
 
 class NodeFeatures(TypedDict):
     user_id: int
+    age: int
+    gender: int
     friends_count: int
     male_count: int
     female_count: int
@@ -164,3 +166,24 @@ class NodeFeatures(TypedDict):
     average_likes: float
     groups_count: int
     average_member: float
+
+class UserInfoResponse(TypedDict):
+    id: int
+    bdate: str
+    followers_count: int
+    sex: int
+    first_name: str
+    last_name: str
+    can_access_closed: bool
+    is_closed: bool
+
+class PostFeatures(TypedDict):
+    count_posts: int
+    count_post_likes: int
+    avg_post_likes: float
+    count_post_comments: int
+    avg_post_comments: float
+    count_post_views: int
+    avg_post_views: float
+    count_post_reports: int
+    avg_post_reports: float
