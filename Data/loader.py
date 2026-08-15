@@ -1,5 +1,9 @@
+import os
 import pandas as pd
+from dotenv import load_dotenv
 from functools import lru_cache
+
+load_dotenv()
 
 class Loader:
 
@@ -66,7 +70,7 @@ class Loader:
         self._loader.cache_clear()
 
     @property
-    def df(self):
+    def df(self)->pd.DataFrame:
         '''
         Public interface for dataset access.
 
@@ -101,6 +105,7 @@ class Loader:
                 - Corrupted dataset
         '''
         try:
-            return pd.read_csv(self._path)
+            return pd.read_json(self._path)
         except Exception as e:
             raise RuntimeError(f'Failed to load: {e}')
+        

@@ -1,7 +1,8 @@
 import vk_api
+import datetime 
 from Data.features.client import Client
 from functools import lru_cache
-from typing import List
+from typing import List, Dict
 
 class VKValidator(Client):
 
@@ -13,7 +14,7 @@ class VKValidator(Client):
         super().__init__()
 
     @lru_cache
-    def _is_acessible(self, users_id: str)->List:
+    def is_acessible(self, users_id: str)->List[Dict]:
         '''
         Filters users with closed/deleted accounts, using batching for speed.
 
@@ -31,5 +32,23 @@ class VKValidator(Client):
             return response
         except vk_api.exceptions.ApiError as e:
             if e.code in (18, 30):
+                return []
+            raise
+
+    def time_validation(self, users_id: str)->List[int]:
+        '''
+        '''
+        valid_users = []
+        valid_time = datetime.datetime.strptime("01-01-2026 00:00:00 +0300", "%d-%m-%Y %H:%M:%S %z")
+        try:
+            responses = self.vk.users.get(user_ids = users_id, fields = 'last_seen')
+            for response in responses:
+                if response.get('last_seen',None)!=None:
+                    last_seen_time = datetime.datetime.fromtimestamp(response['last_seen']['time'], tz=datetime.timezone.utc)
+                    if last_seen_time > valid_time:
+                        valid_users.append(response['id'])
+            return valid_users
+        except vk_api.exceptions.ApiError as e:
+            if e.code(18, 30):
                 return []
             raise

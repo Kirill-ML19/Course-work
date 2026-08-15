@@ -6,7 +6,7 @@ import time
 from Data.target.VkValidator import VKValidator
 from typing import List
 
-class Validator(VKValidator):
+class Validator:
 
     '''
     Dataset validation and preprocessing pipeline.
@@ -43,8 +43,8 @@ class Validator(VKValidator):
             dataset (pd.DataFrame):
                 Stored dataset reference.
         '''
-        super().__init__()
         self.dataset =  dataset
+        self.vk_valid = VKValidator()
 
             
     @property
@@ -67,7 +67,7 @@ class Validator(VKValidator):
                 vk_id (List[int]):
                     List of valid VK user identifiers.
         '''
-        parsed_result = self.dataset['result'].apply(self._parsing)
+        parsed_result = (self.dataset['result'].astype(str)).apply(self._parsing)
         data = self._build(parsed_result)
         clean_df = self._filter_vk_id(data)
         vk_id = self.get_vk_id(clean_df['vk_id'])
@@ -130,13 +130,13 @@ class Validator(VKValidator):
         big_five_df = big_five_df.drop(columns=big_five_df.columns[-1])
 
         if not big_five_df.empty:
-            big_five_df = big_five_df.dropna(axis=0, how='any', subset=big_five_df.columns[big_five_df.isna().any()].tolist())
+            big_five_df = big_five_df.dropna()
         df_final = pd.concat([self.dataset[['vk_id','completion_date']], big_five_df], axis=1)
-        df_final = df_final.sort_values('completion_date').groupby('vk_id').last().reset_index()
-        df_final = df_final.drop(columns='completion_date')
+        df_final['completion_date'] = pd.to_datetime(df_final['completion_date'], unit='ms')
+        df_final = df_final.sort_values(by='completion_date', ignore_index=True)
         return df_final
         
-    def _filter_vk_id(self, dataframe:pd.DataFrame, retries: int = 3)->pd.DataFrame:
+    def _filter_vk_id(self, dataframe: pd.DataFrame, retries: int = 3)->pd.DataFrame:
         '''
         Filter VK users with inaccessible or deleted profiles.
 
@@ -166,12 +166,12 @@ class Validator(VKValidator):
                 chunk_size = 1000
                 for i in range(0, len(vk_ids), chunk_size):
                     chunk = vk_ids[i: i+chunk_size]
-                    users = self._is_acessible(','.join(map(str, chunk)))
+                    users = self.vk_valid.is_acessible(','.join(map(str, chunk)))
+
+                    if users is None:
+                        continue
 
                     for user in users:
-                        if user is None:
-                            continue
-
                         if 'deactivated' in user or (user.get('is_closed') and not user.get('can_access_closed')):
                             inaccessible_ids.add(user.get('id'))
                     time.sleep(0.3)
@@ -183,7 +183,7 @@ class Validator(VKValidator):
                 if attempt == retries - 1:
                     raise
         return dataframe.reset_index(drop=True)
-    
+        
     def get_vk_id(self,vk_id:pd.Series)->List[int]:
         '''
         Extract VK identifiers from dataset.
